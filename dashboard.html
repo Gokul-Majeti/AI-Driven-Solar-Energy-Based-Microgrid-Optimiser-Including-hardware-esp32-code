@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <title>NITW Solar Twin v2.0</title>
+</head>
+<body class="bg-black text-slate-100 font-mono p-4 md:p-8">
+    <div class="max-w-7xl mx-auto">
+        <header class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 border-b border-slate-800 pb-6">
+            <div>
+                <h1 class="text-4xl font-black text-white tracking-tighter">SOLAR DIGITAL TWIN <span class="text-cyan-500 text-xl">[NITW]</span></h1>
+                <p class="text-slate-500 mt-1">XGBoost 5-Minute Predictive Analytics</p>
+            </div>
+            <div id="source-badge" class="mt-4 md:mt-0 px-6 py-3 rounded-full border-2 font-bold text-lg animate-pulse">
+                SOURCE: INITIALIZING...
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl">
+                <p class="text-xs text-slate-500 uppercase">Generation (Now → 5m)</p>
+                <div class="flex items-baseline gap-2 mt-2">
+                    <span id="gen-now" class="text-3xl font-bold">0.00</span>
+                    <span class="text-slate-600">→</span>
+                    <span id="gen-pred" class="text-3xl font-bold text-cyan-400">0.00</span>
+                    <span class="text-xs text-slate-700">W</span>
+                </div>
+            </div>
+
+            <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl">
+                <p class="text-xs text-slate-500 uppercase">Load Demand (Now → 5m)</p>
+                <div class="flex items-baseline gap-2 mt-2">
+                    <span id="load-now" class="text-3xl font-bold">0.00</span>
+                    <span class="text-slate-600">→</span>
+                    <span id="load-pred" class="text-3xl font-bold text-rose-500">0.00</span>
+                    <span class="text-xs text-slate-700">W</span>
+                </div>
+            </div>
+
+            <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl">
+                <p class="text-xs text-slate-500 uppercase">Battery SoC (Now → 5m)</p>
+                <div class="flex items-baseline gap-2 mt-2">
+                    <span id="soc-now" class="text-3xl font-bold">0%</span>
+                    <span class="text-slate-600">→</span>
+                    <span id="soc-pred" class="text-3xl font-bold text-emerald-400">0%</span>
+                </div>
+            </div>
+
+            <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl">
+                <p class="text-xs text-slate-500 uppercase">System Voltages</p>
+                <div class="mt-2 text-sm">
+                    <div class="flex justify-between"><span>Solar:</span> <span id="v-solar" class="font-bold">0.0V</span></div>
+                    <div class="flex justify-between text-slate-400"><span>Batt:</span> <span id="v-batt" class="font-bold">0.0V</span></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-slate-950 border border-slate-800 p-6 rounded-2xl shadow-2xl">
+            <h3 class="text-sm font-bold mb-4 text-slate-500">REAL-TIME TWIN CURVES (GENERATION VS DEMAND)</h3>
+            <canvas id="twinChart" height="120"></canvas>
+        </div>
+    </div>
+
+   <script>
+    const ctx = document.getElementById('twinChart').getContext('2d');
+    const chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                { label: 'Actual Gen', borderColor: '#06b6d4', data: [], tension: 0.3, pointRadius: 0 },
+                { label: 'Pred Gen (5m)', borderColor: '#06b6d4', borderDash: [5, 5], data: [], tension: 0.3, pointRadius: 0 },
+                { label: 'Actual Load', borderColor: '#f43f5e', data: [], tension: 0.3, pointRadius: 0 },
+                { label: 'Pred Load (5m)', borderColor: '#f43f5e', borderDash: [5, 5], data: [], tension: 0.3, pointRadius: 0 }
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { position: 'bottom', labels: { color: '#475569', font: { family: 'monospace' } } } },
+            scales: { 
+                y: { grid: { color: '#1e293b' }, ticks: { color: '#475569' } },
+                x: { grid: { display: false }, ticks: { color: '#475569' } }
+            }
+        }
+    });
+
+    async function updateDashboard() {
+        try {
+            const res = await fetch('http://localhost:5000/data');
+            const data = await res.json();
+            if (data.length === 0) return;
+
+            const last = data[data.length - 1];
+
+            // 1. Update Core Values
+            document.getElementById('gen-now').innerText = last.actual_gen.toFixed(2);
+            document.getElementById('gen-pred').innerText = last.pred_gen.toFixed(2);
+            document.getElementById('load-now').innerText = last.actual_load.toFixed(2);
+            document.getElementById('load-pred').innerText = last.pred_load.toFixed(2);
+            document.getElementById('v-solar').innerText = last.vSolar.toFixed(1) + "V";
+            document.getElementById('v-batt').innerText = last.vBatt.toFixed(2) + "V";
+            
+            // 2. SoC CALIBRATION (Adjusted for 1S Li-ion: 3.5V to 4.2V)
+            const socNow = Math.max(0, Math.min(100, ((last.vBatt - 3.5) / 0.7) * 100));
+            
+            // 3. PREDICTIVE SoC LOGIC
+            // If Pred Gen > Pred Load, Battery Charges. If less, it Discharges.
+            const powerDelta = last.pred_gen - last.pred_load;
+            const socChangeEstimate = powerDelta * 0.5; // Scaling factor for 5-minute interval
+            const socPred = Math.max(0, Math.min(100, socNow + socChangeEstimate));
+
+            document.getElementById('soc-now').innerText = socNow.toFixed(0) + "%";
+            document.getElementById('soc-pred').innerText = socPred.toFixed(0) + "%";
+
+            // 4. Update Source Badge (Added GRID style)
+            const badge = document.getElementById('source-badge');
+            badge.innerText = "SOURCE: " + last.mode;
+            
+            if (last.mode === "SOLAR") { 
+                badge.className = "px-6 py-3 rounded-full border-2 border-cyan-500 text-cyan-500 font-bold bg-cyan-500/10 animate-pulse"; 
+            } else if (last.mode === "BATTERY") { 
+                badge.className = "px-6 py-3 rounded-full border-2 border-emerald-500 text-emerald-500 font-bold bg-emerald-500/10 animate-pulse"; 
+            } else { 
+                // GRID MODE style
+                badge.className = "px-6 py-3 rounded-full border-2 border-orange-600 text-orange-600 font-bold bg-orange-600/10"; 
+            }
+
+            // 5. Update Chart
+            chart.data.labels = data.map(d => d.time);
+            chart.data.datasets[0].data = data.map(d => d.actual_gen);
+            chart.data.datasets[1].data = data.map(d => d.pred_gen);
+            chart.data.datasets[2].data = data.map(d => d.actual_load);
+            chart.data.datasets[3].data = data.map(d => d.pred_load);
+            chart.update('none'); // Update without animation for performance
+            
+        } catch (e) { 
+            console.log("Waiting for Flask server connection..."); 
+        }
+    }
+    // Refresh interval set to 3 seconds for real-time feel
+    setInterval(updateDashboard, 3000);
+</script>
+</body>
+</html>
